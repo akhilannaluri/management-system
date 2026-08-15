@@ -27,11 +27,13 @@ export async function seedInitialData(): Promise<void> {
   try {
     const isMongo = dbState.isConnectedToMongo;
     
-   // 1. Seed Admin
+  // 1. Seed Admin
 const defaultUsername = process.env.ADMIN_USERNAME || 'admin';
-const defaultPassword = process.env.ADMIN_PASSWORD || 'adminpassword123';
+const defaultPassword = process.env.ADMIN_PASSWORD;
 
-if (isMongo) {
+if (!defaultPassword) {
+  console.warn('[Seed] ADMIN_PASSWORD is not configured. Admin seeding skipped.');
+} else if (isMongo) {
   const existingAdmin = await (AdminModel as any).findOne({
     username: defaultUsername
   });
@@ -48,7 +50,7 @@ if (isMongo) {
       role: 'admin'
     });
 
-    console.log(`[Seed] Created default admin account: ${defaultUsername}`);
+    console.log(`[Seed] Created admin account: ${defaultUsername}`);
   } else {
     console.log(`[Seed] Admin already exists: ${defaultUsername}`);
   }
