@@ -67,10 +67,15 @@ if (!defaultPassword) {
     username: defaultUsername
   });
 
+ if (isMongo) {
+  const existingAdmin = await (AdminModel as any).findOne({
+    username: defaultUsername
+  });
+
   if (!existingAdmin) {
     const hashedPassword = await bcrypt.hash(defaultPassword, 10);
 
-    await AdminStore.create({
+    await (AdminModel as any).create({
       username: defaultUsername,
       password: hashedPassword,
       name: 'Apartment Administrator',
@@ -79,10 +84,18 @@ if (!defaultPassword) {
       role: 'admin'
     });
 
-    console.log(`[Seed] (FileStore) Created default admin: ${defaultUsername}`);
+    console.log(`[Seed] Created admin account: ${defaultUsername}`);
   } else {
-    console.log(`[Seed] (FileStore) Admin already exists: ${defaultUsername}`);
+    const hashedPassword = await bcrypt.hash(defaultPassword, 10);
+
+    await (AdminModel as any).updateOne(
+      { _id: existingAdmin._id },
+      { $set: { password: hashedPassword } }
+    );
+
+    console.log(`[Seed] Admin password synchronized from environment`);
   }
+}
 }
 
     // 2. Seed Apartment Settings
