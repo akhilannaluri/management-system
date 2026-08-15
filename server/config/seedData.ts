@@ -52,7 +52,14 @@ if (!defaultPassword) {
 
     console.log(`[Seed] Created admin account: ${defaultUsername}`);
   } else {
-    console.log(`[Seed] Admin already exists: ${defaultUsername}`);
+     const hashedPassword = await bcrypt.hash(defaultPassword, 10);
+
+  await (AdminModel as any).updateOne(
+    { _id: existingAdmin._id },
+    { $set: { password: hashedPassword } }
+  );
+
+  console.log(`[Seed] Admin password updated from environment variable`);
   }
 
 } else {
