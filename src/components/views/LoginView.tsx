@@ -4,8 +4,8 @@ import { Building2, Lock, User, ShieldCheck, ArrowRight } from 'lucide-react';
 
 export const LoginView: React.FC = () => {
   const { login } = useAuth();
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('adminpassword123');
+const [username, setUsername] = useState('');
+const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -53,14 +53,15 @@ export const LoginView: React.FC = () => {
               <label className="form-label small fw-semibold text-muted">Admin Username</label>
               <div className="input-group">
                 <span className="input-group-text bg-light"><User size={16} className="text-muted" /></span>
-                <input
-                  type="text"
-                  className="form-control"
-                  placeholder="admin"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  required
-                />
+               <input
+             type="text"
+            className="form-control"
+             placeholder="Enter admin username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoComplete="username"
+            required
+              />
               </div>
             </div>
 
@@ -69,13 +70,14 @@ export const LoginView: React.FC = () => {
               <div className="input-group">
                 <span className="input-group-text bg-light"><Lock size={16} className="text-muted" /></span>
                 <input
-                  type="password"
-                  className="form-control"
-                  placeholder="••••••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                />
+  type="password"
+  className="form-control"
+  placeholder="Enter password"
+  value={password}
+  onChange={(e) => setPassword(e.target.value)}
+  autoComplete="current-password"
+  required
+/>
               </div>
             </div>
 
@@ -89,26 +91,7 @@ export const LoginView: React.FC = () => {
             </button>
           </form>
 
-          {/* Quick-fill Helper for convenient testing */}
-          <div className="mt-4 pt-3 border-top text-center">
-            <div className="text-muted small mb-2">Default Admin Credentials:</div>
-            <div className="bg-light p-2 rounded-3 text-start small font-monospace d-flex justify-content-between align-items-center">
-              <div>
-                <div>Username: <strong className="text-dark">admin</strong></div>
-                <div>Password: <strong className="text-dark">adminpassword123</strong></div>
-              </div>
-              <button
-                type="button"
-                className="btn btn-outline-primary btn-sm py-1 px-2"
-                onClick={() => {
-                  setUsername('admin');
-                  setPassword('adminpassword123');
-                }}
-              >
-                Auto-fill
-              </button>
-            </div>
-          </div>
+         
 
         </div>
 

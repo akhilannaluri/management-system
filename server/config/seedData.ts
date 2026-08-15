@@ -27,52 +27,54 @@ export async function seedInitialData(): Promise<void> {
   try {
     const isMongo = dbState.isConnectedToMongo;
     
-    // 1. Seed Admin
-    const defaultUsername = process.env.ADMIN_USERNAME || 'admin';
-    const defaultPassword = process.env.ADMIN_PASSWORD || 'adminpassword123';
-    
-    if (isMongo) {
-      const existingAdmin = await (AdminModel as any).findOne({ username: defaultUsername });
-      if (!existingAdmin) {
-        const hashedPassword = await bcrypt.hash(defaultPassword, 10);
-        await (AdminModel as any).create({
-          username: defaultUsername,
-          password: hashedPassword,
-          name: 'Apartment Administrator',
-          email: 'admin@greenviewheights.com',
-          phone: '+91 98765 43210',
-          role: 'admin'
-        });
-        console.log(`[Seed] Created default admin account: ${defaultUsername}`);
-      } else {
-        const hashedPassword = await bcrypt.hash(defaultPassword, 10);
-        await (AdminModel as any).updateOne(
-          { _id: existingAdmin._id },
-          { $set: { password: hashedPassword } }
-        );
-        console.log(`[Seed] Synced admin password for: ${defaultUsername}`);
-      }
-    } else {
-      const existingAdmin = await AdminStore.findOne({ username: defaultUsername });
-      if (!existingAdmin) {
-        const hashedPassword = await bcrypt.hash(defaultPassword, 10);
-        await AdminStore.create({
-          username: defaultUsername,
-          password: hashedPassword,
-          name: 'Apartment Administrator',
-          email: 'admin@greenviewheights.com',
-          phone: '+91 98765 43210',
-          role: 'admin'
-        });
-        console.log(`[Seed] (FileStore) Created default admin: ${defaultUsername}`);
-      } else {
-        const hashedPassword = await bcrypt.hash(defaultPassword, 10);
-        await AdminStore.findByIdAndUpdate(existingAdmin._id || existingAdmin.id, {
-          password: hashedPassword
-        });
-        console.log(`[Seed] (FileStore) Synced admin password for: ${defaultUsername}`);
-      }
-    }
+   // 1. Seed Admin
+const defaultUsername = process.env.ADMIN_USERNAME || 'admin';
+const defaultPassword = process.env.ADMIN_PASSWORD || 'adminpassword123';
+
+if (isMongo) {
+  const existingAdmin = await (AdminModel as any).findOne({
+    username: defaultUsername
+  });
+
+  if (!existingAdmin) {
+    const hashedPassword = await bcrypt.hash(defaultPassword, 10);
+
+    await (AdminModel as any).create({
+      username: defaultUsername,
+      password: hashedPassword,
+      name: 'Apartment Administrator',
+      email: 'admin@greenviewheights.com',
+      phone: '+91 98765 43210',
+      role: 'admin'
+    });
+
+    console.log(`[Seed] Created default admin account: ${defaultUsername}`);
+  } else {
+    console.log(`[Seed] Admin already exists: ${defaultUsername}`);
+  }
+
+} else {
+  const existingAdmin = await AdminStore.findOne({
+    username: defaultUsername
+  });
+
+  if (!existingAdmin) {
+    const hashedPassword = await bcrypt.hash(defaultPassword, 10);
+
+    await AdminStore.create({
+      username: defaultUsername,
+      password: hashedPassword,
+      name: 'Apartment Administrator',
+      email: 'admin@greenviewheights.com',
+      phone: '+91 98765 43210',
+      role: 'admin'
+    });
+
+    console.log(`[Seed] (FileStore) Created default admin: ${defaultUsername}`);
+  } else {
+    console.log(`[Seed] (FileStore) Admin already exists: ${defaultUsername}`);
+  }
+}
 
     // 2. Seed Apartment Settings
     const defaultSettings = {
