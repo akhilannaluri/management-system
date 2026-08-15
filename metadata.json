@@ -1,0 +1,6 @@
+{
+  "name": "Apartment Management System",
+  "description": "Admin dashboard and record management system for apartment flats, monthly maintenance collection, recurring/one-time expenses, tasks, reports, and Excel export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
