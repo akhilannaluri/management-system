@@ -330,68 +330,75 @@ export const bulkImportFlats = async (req: Request, res: Response) => {
 
     let insertedCount = 0;
     let updatedCount = 0;
+if (mode === 'replace_all') {
+  console.log('[Bulk Import] REPLACE_ALL mode');
+  console.log('[Bulk Import] Existing flats:', existingFlats.length);
+  console.log('[Bulk Import] Excel flats:', sanitizedFlats.length);
 
-    if (mode === 'replace_all') {
-      // In replace_all mode, we update existing matching flats to keep their stable IDs,
-      // insert new ones, and remove old demo flats that are NOT present in the uploaded file.
-      const currentUploadFlatKeys = new Set(sanitizedFlats.map(f => f.flatNumber.toLowerCase()));
+  // Delete ALL existing flats
+  if (isMongo) {
+    const deleteResult = await FlatModel.deleteMany({});
 
-      for (const flatData of sanitizedFlats) {
-        const existing = existingMap.get(flatData.flatNumber.toLowerCase());
-        if (existing) {
-          const id = existing._id || existing.id;
-          if (isMongo) {
-            await (FlatModel as any).findByIdAndUpdate(id, flatData);
-          } else {
-            await FlatStore.findByIdAndUpdate(id, flatData);
-          }
-          updatedCount++;
-        } else {
-          if (isMongo) {
-            await FlatModel.create(flatData);
-          } else {
-            await FlatStore.create(flatData);
-          }
-          insertedCount++;
-        }
-      }
+    console.log(
+      `[Bulk Import] Deleted ${deleteResult.deletedCount} existing flats`
+    );
+  } else {
+    for (const existing of existingFlats) {
+      const id = existing._id || existing.id;
 
-      // Remove flats not in the imported list (e.g. old demo placeholder flats)
-      const idsToRemove = existingFlats
-        .filter((f: any) => !currentUploadFlatKeys.has((f.flatNumber || '').trim().toLowerCase()))
-        .map((f: any) => f._id || f.id);
-
-      if (idsToRemove.length > 0) {
-        if (isMongo) {
-          await FlatModel.deleteMany({ _id: { $in: idsToRemove } });
-        } else {
-          for (const id of idsToRemove) {
-            await FlatStore.findByIdAndDelete(id);
-          }
-        }
-      }
-    } else {
-      // Default Upsert mode: update existing flats if flatNumber matches, or insert if new
-      for (const flatData of sanitizedFlats) {
-        const existing = existingMap.get(flatData.flatNumber.toLowerCase());
-        if (existing) {
-          const id = existing._id || existing.id;
-          if (isMongo) {
-            await (FlatModel as any).findByIdAndUpdate(id, flatData);
-          } else {
-            await FlatStore.findByIdAndUpdate(id, flatData);
-          }
-          updatedCount++;
-        } else {
-          if (isMongo) {
-            await FlatModel.create(flatData);
-          } else {
-            await FlatStore.create(flatData);
-          }
-          insertedCount++;
-        }
+      if (id) {
+        await FlatStore.findByIdAndDelete(id);
       }
     }
+  }
+
+  // Insert exactly the flats from Excel
+  if (isMongo) {
+    await FlatModel.insertMany(sanitizedFlats);
+  } else {
+    await FlatStore.insertMany(sanitizedFlats);
+  }
+
+  insertedCount = sanitizedFlats.length;
+
+  console.log(
+    `[Bulk Import] Inserted ${insertedCount} flats`
+  );
+
+} else {
+  // Upsert mode: update existing flats and add new flats
+  for (const flatData of sanitizedFlats) {
+    const existing = existingMap.get(
+      flatData.flatNumber.toLowerCase()
+    );
+
+    if (existing) {
+      const id = existing._id || existing.id;
+
+      if (isMongo) {
+        await (FlatModel as any).findByIdAndUpdate(
+          id,
+          flatData
+        );
+      } else {
+        await FlatStore.findByIdAndUpdate(
+          id,
+          flatData
+        );
+      }
+
+      updatedCount++;
+    } else {
+      if (isMongo) {
+        await FlatModel.create(flatData);
+      } else {
+        await FlatStore.create(flatData);
+      }
+
+      insertedCount++;
+    }
+  }
+}
 
     // Update settings totalFlats count
     const totalCount = isMongo ? await (FlatModel as any).countDocuments() : await FlatStore.countDocuments();
