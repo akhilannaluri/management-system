@@ -32,16 +32,16 @@ const defaultUsername = process.env.ADMIN_USERNAME || 'admin';
 const defaultPassword = process.env.ADMIN_PASSWORD;
 
 if (!defaultPassword) {
-  console.warn('[Seed] ADMIN_PASSWORD is not configured. Admin seeding skipped.');
+  console.warn('[Seed] ADMIN_PASSWORD is not configured.');
 } else if (isMongo) {
-  const existingAdmin = await (AdminModel as any).findOne({
+  const existingAdmin = await AdminModel.findOne({
     username: defaultUsername
   });
 
   if (!existingAdmin) {
     const hashedPassword = await bcrypt.hash(defaultPassword, 10);
 
-    await (AdminModel as any).create({
+    await AdminModel.create({
       username: defaultUsername,
       password: hashedPassword,
       name: 'Apartment Administrator',
@@ -52,52 +52,9 @@ if (!defaultPassword) {
 
     console.log(`[Seed] Created admin account: ${defaultUsername}`);
   } else {
-     const hashedPassword = await bcrypt.hash(defaultPassword, 10);
-
-  await (AdminModel as any).updateOne(
-    { _id: existingAdmin._id },
-    { $set: { password: hashedPassword } }
-  );
-
-  console.log(`[Seed] Admin password updated from environment variable`);
-  }
-
-} else {
-  const existingAdmin = await AdminStore.findOne({
-    username: defaultUsername
-  });
-
- if (isMongo) {
-  const existingAdmin = await (AdminModel as any).findOne({
-    username: defaultUsername
-  });
-
-  if (!existingAdmin) {
-    const hashedPassword = await bcrypt.hash(defaultPassword, 10);
-
-    await (AdminModel as any).create({
-      username: defaultUsername,
-      password: hashedPassword,
-      name: 'Apartment Administrator',
-      email: 'admin@greenviewheights.com',
-      phone: '+91 98765 43210',
-      role: 'admin'
-    });
-
-    console.log(`[Seed] Created admin account: ${defaultUsername}`);
-  } else {
-    const hashedPassword = await bcrypt.hash(defaultPassword, 10);
-
-    await (AdminModel as any).updateOne(
-      { _id: existingAdmin._id },
-      { $set: { password: hashedPassword } }
-    );
-
-    console.log(`[Seed] Admin password synchronized from environment`);
+    console.log(`[Seed] Admin already exists: ${defaultUsername}`);
   }
 }
-}
-
     // 2. Seed Apartment Settings
     const defaultSettings = {
       apartmentName: 'Greenview Heights Apartments',

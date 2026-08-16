@@ -27,10 +27,13 @@ async function startServer() {
   // Trust proxy for reverse proxy / iframe environments
   app.set('trust proxy', 1);
 
-  // Initialize DB and seeds
-  await connectDB();
-  await seedInitialData();
+ // Initialize DB
+await connectDB();
 
+// Seed only when explicitly enabled
+if (process.env.SEED_DATA === 'true') {
+  await seedInitialData();
+}
   // Middleware
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
