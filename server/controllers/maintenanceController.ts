@@ -1,56 +1,171 @@
 import { Request, Response } from 'express';
 import { dbState } from '../config/db';
-import { MaintenanceRecordModel, MaintenanceRecordStore } from '../models/MaintenanceRecord';
+import {
+  MaintenanceRecordModel,
+  MaintenanceRecordStore
+} from '../models/MaintenanceRecord';
 import { FlatModel, FlatStore } from '../models/Flat';
-import { ApartmentSettingsModel, SettingsStore } from '../models/ApartmentSettings';
+import {
+  ApartmentSettingsModel,
+  SettingsStore
+} from '../models/ApartmentSettings';
 
 /**
- * Helper to ensure all flats have a record for the specified month
+ * Get all active flats.
+ * Flats collection is the SOURCE OF TRUTH for the number of flats.
  */
-async function ensureMonthRecords(month: string) {
+async function getActiveFlats(): Promise<any[]> {
   const isMongo = dbState.isConnectedToMongo;
-  
-  // Get all active flats
-  const flats = isMongo 
-    ? await (FlatModel as any).find({ status: { $ne: 'Inactive' } }).lean() 
-    : await FlatStore.find((f: any) => (f.status || 'Active') !== 'Inactive');
-  
-  // Get default maintenance rate from settings
+
+  if (isMongo) {
+    return await (FlatModel as any)
+      .find({ status: { $ne: 'Inactive' } })
+      .lean();
+  }
+
+  return await FlatStore.find(
+    (f: any) => (f.status || 'Active') !== 'Inactive'
+  );
+}
+
+/**
+ * Get the default monthly maintenance amount.
+ */
+async function getDefaultMaintenanceAmount(): Promise<number> {
+  const isMongo = dbState.isConnectedToMongo;
+
   let defaultAmount = 1500;
+
   if (isMongo) {
     const settings = await ApartmentSettingsModel.findOne().lean();
-    if (settings && settings.defaultMonthlyMaintenance) {
-      defaultAmount = settings.defaultMonthlyMaintenance;
+
+    if (
+      settings &&
+      settings.defaultMonthlyMaintenance !== undefined &&
+      settings.defaultMonthlyMaintenance !== null
+    ) {
+      defaultAmount = Number(settings.defaultMonthlyMaintenance) || 1500;
     }
   } else {
     const settings = await SettingsStore.findOne(() => true);
-    if (settings && settings.defaultMonthlyMaintenance) {
-      defaultAmount = settings.defaultMonthlyMaintenance;
+
+    if (
+      settings &&
+      settings.defaultMonthlyMaintenance !== undefined &&
+      settings.defaultMonthlyMaintenance !== null
+    ) {
+      defaultAmount = Number(settings.defaultMonthlyMaintenance) || 1500;
     }
   }
 
-  // Get existing records for this month
-  const existingRecords = isMongo 
-    ? await (MaintenanceRecordModel as any).find({ month }).lean()
-    : await MaintenanceRecordStore.find({ month });
+  return defaultAmount;
+}
 
-  const existingMap = new Map();
-  existingRecords.forEach((r: any) => {
-    existingMap.set(String(r.flatId), r);
-  });
+/**
+ * Get all maintenance records for a month.
+ */
+async function getMonthRecords(month: string): Promise<any[]> {
+  const isMongo = dbState.isConnectedToMongo;
+
+  if (isMongo) {
+    return await (MaintenanceRecordModel as any)
+      .find({ month })
+      .lean();
+  }
+
+  return await MaintenanceRecordStore.find({ month });
+}
+
+/**
+ * Convert flatId to a reliable string.
+ */
+function getFlatId(record: any): string {
+  if (!record) return '';
+
+  if (
+    typeof record.flatId === 'object' &&
+    record.flatId &&
+    record.flatId._id
+  ) {
+    return String(record.flatId._id);
+  }
+
+  return String(record.flatId || '');
+}
+
+/**
+ * Create exactly ONE maintenance record for every active flat.
+ *
+ * IMPORTANT:
+ * The Flat collection is the source of truth.
+ *
+ * If duplicate maintenance records already exist for the same flat/month,
+ * only the latest one is used.
+ *
+ * Missing records are automatically created.
+ */
+async function ensureMonthRecords(month: string) {
+  const isMongo = dbState.isConnectedToMongo;
+
+  const flats = await getActiveFlats();
+  const defaultAmount = await getDefaultMaintenanceAmount();
+  const existingRecords = await getMonthRecords(month);
+
+  /**
+   * Keep only one record per flatId.
+   * If duplicates exist, keep the latest updated record.
+   */
+  const existingMap = new Map<string, any>();
+
+  for (const record of existingRecords) {
+    const flatId = getFlatId(record);
+
+    if (!flatId) continue;
+
+    const existing = existingMap.get(flatId);
+
+    if (!existing) {
+      existingMap.set(flatId, record);
+      continue;
+    }
+
+    const existingTime = new Date(
+      existing.updatedAt ||
+      existing.createdAt ||
+      0
+    ).getTime();
+
+    const recordTime = new Date(
+      record.updatedAt ||
+      record.createdAt ||
+      0
+    ).getTime();
+
+    if (recordTime >= existingTime) {
+      existingMap.set(flatId, record);
+    }
+  }
 
   const missingRecords: any[] = [];
+
   for (const flat of flats) {
     const flatId = String(flat._id || flat.id);
+
+    if (!flatId) continue;
+
     if (!existingMap.has(flatId)) {
+      const amount =
+        flat.customMaintenanceAmount !== null &&
+        flat.customMaintenanceAmount !== undefined
+          ? Number(flat.customMaintenanceAmount)
+          : defaultAmount;
+
       missingRecords.push({
         month,
         flatId: flat._id || flat.id,
         flatNumber: flat.flatNumber,
         residentName: flat.residentName,
-        amount: flat.customMaintenanceAmount !== null && flat.customMaintenanceAmount !== undefined 
-          ? flat.customMaintenanceAmount 
-          : defaultAmount,
+        amount: Number(amount) || defaultAmount,
         status: 'Pending',
         paidDate: null,
         paymentMode: '',
@@ -69,120 +184,247 @@ async function ensureMonthRecords(month: string) {
   }
 }
 
-export const getMonthMaintenance = async (req: Request, res: Response) => {
+/**
+ * Build EXACTLY ONE maintenance record per active flat.
+ *
+ * This is the most important helper in this controller.
+ *
+ * Example:
+ * 57 flats + 171 old maintenance records
+ * =>
+ * exactly 57 records are returned.
+ */
+async function buildUniqueMonthRecords(month: string): Promise<any[]> {
+  const flats = await getActiveFlats();
+  const rawRecords = await getMonthRecords(month);
+
+  const recordMap = new Map<string, any>();
+
+  /**
+   * First map records by flatId.
+   */
+  for (const record of rawRecords) {
+    const flatId = getFlatId(record);
+
+    if (!flatId) continue;
+
+    const existing = recordMap.get(flatId);
+
+    if (!existing) {
+      recordMap.set(flatId, record);
+      continue;
+    }
+
+    /**
+     * If duplicates exist, keep the newest record.
+     */
+    const existingTime = new Date(
+      existing.updatedAt ||
+      existing.createdAt ||
+      0
+    ).getTime();
+
+    const recordTime = new Date(
+      record.updatedAt ||
+      record.createdAt ||
+      0
+    ).getTime();
+
+    if (recordTime >= existingTime) {
+      recordMap.set(flatId, record);
+    }
+  }
+
+  /**
+   * Build records from CURRENT ACTIVE FLATS.
+   *
+   * Therefore:
+   *
+   * 57 active flats => maximum 57 maintenance rows.
+   */
+  const uniqueRecords: any[] = [];
+
+  for (const flat of flats) {
+    const flatId = String(flat._id || flat.id);
+
+    const existingRecord = recordMap.get(flatId);
+
+    if (existingRecord) {
+      uniqueRecords.push({
+        ...existingRecord,
+        flatId,
+        flatNumber: flat.flatNumber,
+        residentName: flat.residentName,
+        amount:
+          existingRecord.amount !== undefined &&
+          existingRecord.amount !== null
+            ? Number(existingRecord.amount)
+            : flat.customMaintenanceAmount !== null &&
+              flat.customMaintenanceAmount !== undefined
+              ? Number(flat.customMaintenanceAmount)
+              : 1500
+      });
+    } else {
+      uniqueRecords.push({
+        flatId,
+        flatNumber: flat.flatNumber,
+        residentName: flat.residentName,
+        amount:
+          flat.customMaintenanceAmount !== null &&
+          flat.customMaintenanceAmount !== undefined
+            ? Number(flat.customMaintenanceAmount)
+            : 1500,
+        status: 'Pending',
+        paidDate: null,
+        paymentMode: '',
+        receiptNumber: '',
+        remarks: ''
+      });
+    }
+  }
+
+  uniqueRecords.sort((a: any, b: any) =>
+    String(a.flatNumber || '').localeCompare(
+      String(b.flatNumber || ''),
+      undefined,
+      { numeric: true }
+    )
+  );
+
+  return uniqueRecords;
+}
+
+/**
+ * GET MONTHLY MAINTENANCE
+ */
+export const getMonthMaintenance = async (
+  req: Request,
+  res: Response
+) => {
   try {
-    const { month } = req.params; // format: YYYY-MM
+    const { month } = req.params;
     const { status, search, block } = req.query;
 
     if (!month || !/^\d{4}-\d{2}$/.test(month)) {
-      return res.status(400).json({ success: false, message: 'Invalid month format. Expected YYYY-MM' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid month format. Expected YYYY-MM'
+      });
     }
 
-    // Auto-create any missing records for this month
+    /**
+     * Ensure every active flat has a record.
+     */
     await ensureMonthRecords(month);
 
-    const isMongo = dbState.isConnectedToMongo;
-    let records: any[] = [];
+    /**
+     * Build exactly one record per active flat.
+     */
+    let allRecords = await buildUniqueMonthRecords(month);
 
-    if (isMongo) {
-      const query: any = { month };
-      if (status && (status === 'Paid' || status === 'Pending')) {
-        query.status = status;
-      }
-      if (search) {
-        query.$or = [
-          { flatNumber: { $regex: String(search), $options: 'i' } },
-          { residentName: { $regex: String(search), $options: 'i' } }
-        ];
-      }
-      records = await MaintenanceRecordModel.find(query)
-        .populate('flatId', 'block floor phone residentType occupancyStatus')
-        .sort({ flatNumber: 1 })
-        .lean();
-    } else {
-      const flats = await FlatStore.find();
-      const flatMap = new Map(flats.map((f: any) => [String(f._id || f.id), f]));
+    /**
+     * Attach extra flat information.
+     */
+    const flats = await getActiveFlats();
 
-      records = await MaintenanceRecordStore.find((r: any) => {
-        if (r.month !== month) return false;
-        if (status && r.status !== status) return false;
-        if (search) {
-          const s = String(search).toLowerCase();
-          const matchFlat = (r.flatNumber || '').toLowerCase().includes(s);
-          const matchName = (r.residentName || '').toLowerCase().includes(s);
-          if (!matchFlat && !matchName) return false;
-        }
-        return true;
-      });
+    const flatMap = new Map<string, any>();
 
-      // Populate flat data and filter block if provided
-      records = records.map((r: any) => {
-        const flat = flatMap.get(String(r.flatId)) || {};
-        return {
-          ...r,
-          flatId: flat
-        };
-      });
+    flats.forEach((flat: any) => {
+      flatMap.set(String(flat._id || flat.id), flat);
+    });
 
-      if (block) {
-        records = records.filter((r: any) => r.flatId?.block === block);
-      }
+    allRecords = allRecords.map((record: any) => {
+      const flat = flatMap.get(String(record.flatId));
 
-      records.sort((a, b) => (a.flatNumber || '').localeCompare(b.flatNumber || '', undefined, { numeric: true }));
+      return {
+        ...record,
+        flatId: flat || record.flatId
+      };
+    });
+
+    /**
+     * Apply filters AFTER building the unique 57-flat dataset.
+     */
+    let records = allRecords;
+
+    if (status === 'Paid' || status === 'Pending') {
+      records = records.filter(
+        (record: any) => record.status === status
+      );
     }
 
-    // Calculate all financial figures accurately from database records
-    // Calculate financial figures for the actual active flats
-const allMonthRecords = isMongo
-  ? await (MaintenanceRecordModel as any).find({ month }).lean()
-  : await MaintenanceRecordStore.find({ month });
+    if (search) {
+      const searchText = String(search).toLowerCase();
 
-const activeFlats = isMongo
-  ? await (FlatModel as any)
-      .find({ status: { $ne: 'Inactive' } })
-      .lean()
-  : await FlatStore.find((f: any) => (f.status || 'Active') !== 'Inactive');
+      records = records.filter((record: any) => {
+        const flatNumber = String(
+          record.flatNumber || ''
+        ).toLowerCase();
 
-const totalFlats = activeFlats.length;
+        const residentName = String(
+          record.residentName || ''
+        ).toLowerCase();
 
-const activeFlatIds = new Set(
-  activeFlats.map((flat: any) => String(flat._id || flat.id))
-);
+        return (
+          flatNumber.includes(searchText) ||
+          residentName.includes(searchText)
+        );
+      });
+    }
 
-let expectedMaintenance = 0;
-let totalCollected = 0;
-let paidCount = 0;
-let pendingCount = 0;
+    if (block) {
+      records = records.filter(
+        (record: any) =>
+          record.flatId?.block === String(block)
+      );
+    }
 
-// Only count maintenance records belonging to current active flats
-for (const r of allMonthRecords) {
-  const flatId = String(
-    typeof r.flatId === 'object' && r.flatId?._id
-      ? r.flatId._id
-      : r.flatId
-  );
+    /**
+     * FINANCIAL SUMMARY
+     *
+     * IMPORTANT:
+     * Use the unique allRecords array, NOT the filtered records.
+     *
+     * This prevents search/status/block filters from changing
+     * dashboard totals.
+     */
+    const totalFlats = allRecords.length;
 
-  if (!activeFlatIds.has(flatId)) continue;
+    let expectedMaintenance = 0;
+    let totalCollected = 0;
+    let paidCount = 0;
+    let pendingCount = 0;
 
-  const amt = Number(r.amount) || 0;
+    for (const record of allRecords) {
+      const amount = Number(record.amount) || 0;
 
-  expectedMaintenance += amt;
+      expectedMaintenance += amount;
 
-  if (r.status === 'Paid') {
-    totalCollected += amt;
-    paidCount++;
-  } else {
-    pendingCount++;
-  }
-}
-   const totalPending = expectedMaintenance - totalCollected;
-    const collectionPercentage = expectedMaintenance > 0 
-      ? Number(((totalCollected / expectedMaintenance) * 100).toFixed(1)) 
-      : 0;
+      if (record.status === 'Paid') {
+        totalCollected += amount;
+        paidCount++;
+      } else {
+        pendingCount++;
+      }
+    }
+
+    const totalPending =
+      expectedMaintenance - totalCollected;
+
+    const collectionPercentage =
+      expectedMaintenance > 0
+        ? Number(
+            (
+              (totalCollected / expectedMaintenance) *
+              100
+            ).toFixed(1)
+          )
+        : 0;
 
     return res.json({
       success: true,
       month,
+
       summary: {
         totalFlats,
         expectedMaintenance,
@@ -192,37 +434,85 @@ for (const r of allMonthRecords) {
         pendingCount,
         collectionPercentage
       },
+
       count: records.length,
       records
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: 'Error fetching maintenance records', error: err.message });
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching maintenance records',
+      error: err.message
+    });
   }
 };
 
-export const updatePaymentStatus = async (req: Request, res: Response) => {
+/**
+ * UPDATE SINGLE PAYMENT STATUS
+ */
+export const updatePaymentStatus = async (
+  req: Request,
+  res: Response
+) => {
   try {
     const { id } = req.params;
-    const { status, amount, paymentMode, paidDate, receiptNumber, remarks } = req.body;
 
-    if (!status || !['Paid', 'Pending'].includes(status)) {
-      return res.status(400).json({ success: false, message: 'Status must be "Paid" or "Pending"' });
+    const {
+      status,
+      amount,
+      paymentMode,
+      paidDate,
+      receiptNumber,
+      remarks
+    } = req.body;
+
+    if (
+      !status ||
+      !['Paid', 'Pending'].includes(status)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Status must be "Paid" or "Pending"'
+      });
     }
 
     const isMongo = dbState.isConnectedToMongo;
+
     const updateData: any = {
       status,
-      remarks: remarks !== undefined ? remarks : ''
+      remarks:
+        remarks !== undefined
+          ? remarks
+          : ''
     };
 
     if (amount !== undefined) {
-      updateData.amount = Number(amount);
+      const numericAmount = Number(amount);
+
+      if (
+        Number.isNaN(numericAmount) ||
+        numericAmount < 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid maintenance amount'
+        });
+      }
+
+      updateData.amount = numericAmount;
     }
 
     if (status === 'Paid') {
-      updateData.paidDate = paidDate ? new Date(paidDate) : new Date();
-      updateData.paymentMode = paymentMode || 'UPI';
-      updateData.receiptNumber = receiptNumber || `REC-${Date.now().toString().slice(-6)}`;
+      updateData.paidDate = paidDate
+        ? new Date(paidDate)
+        : new Date();
+
+      updateData.paymentMode =
+        paymentMode || 'UPI';
+
+      updateData.receiptNumber =
+        receiptNumber ||
+        `REC-${Date.now().toString().slice(-6)}`;
     } else {
       updateData.paidDate = null;
       updateData.paymentMode = '';
@@ -232,35 +522,75 @@ export const updatePaymentStatus = async (req: Request, res: Response) => {
     let updatedRecord: any = null;
 
     if (isMongo) {
-      updatedRecord = await (MaintenanceRecordModel as any).findByIdAndUpdate(id, updateData, { new: true });
+      updatedRecord =
+        await (MaintenanceRecordModel as any)
+          .findByIdAndUpdate(
+            id,
+            updateData,
+            { new: true }
+          );
     } else {
-      updatedRecord = await MaintenanceRecordStore.findByIdAndUpdate(id, updateData);
+      updatedRecord =
+        await MaintenanceRecordStore.findByIdAndUpdate(
+          id,
+          updateData
+        );
     }
 
     if (!updatedRecord) {
-      return res.status(404).json({ success: false, message: 'Maintenance record not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'Maintenance record not found'
+      });
     }
 
     return res.json({
       success: true,
-      message: `Flat ${updatedRecord.flatNumber} payment marked as ${status}`,
+      message:
+        `Flat ${updatedRecord.flatNumber} payment marked as ${status}`,
       record: updatedRecord
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: 'Error updating payment status', error: err.message });
+    return res.status(500).json({
+      success: false,
+      message: 'Error updating payment status',
+      error: err.message
+    });
   }
 };
 
-export const batchUpdateStatus = async (req: Request, res: Response) => {
+/**
+ * BATCH UPDATE PAYMENT STATUS
+ */
+export const batchUpdateStatus = async (
+  req: Request,
+  res: Response
+) => {
   try {
-    const { recordIds, status, paymentMode, remarks } = req.body;
+    const {
+      recordIds,
+      status,
+      paymentMode,
+      remarks
+    } = req.body;
 
-    if (!Array.isArray(recordIds) || recordIds.length === 0) {
-      return res.status(400).json({ success: false, message: 'recordIds array is required' });
+    if (
+      !Array.isArray(recordIds) ||
+      recordIds.length === 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'recordIds array is required'
+      });
     }
 
-    if (!['Paid', 'Pending'].includes(status)) {
-      return res.status(400).json({ success: false, message: 'Status must be "Paid" or "Pending"' });
+    if (
+      !['Paid', 'Pending'].includes(status)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'Status must be "Paid" or "Pending"'
+      });
     }
 
     const isMongo = dbState.isConnectedToMongo;
@@ -272,7 +602,8 @@ export const batchUpdateStatus = async (req: Request, res: Response) => {
 
     if (status === 'Paid') {
       updatePayload.paidDate = new Date();
-      updatePayload.paymentMode = paymentMode || 'UPI';
+      updatePayload.paymentMode =
+        paymentMode || 'UPI';
     } else {
       updatePayload.paidDate = null;
       updatePayload.paymentMode = '';
@@ -280,61 +611,144 @@ export const batchUpdateStatus = async (req: Request, res: Response) => {
     }
 
     if (isMongo) {
-      await (MaintenanceRecordModel as any).updateMany(
-        { _id: { $in: recordIds } },
-        { $set: updatePayload }
-      );
+      await (MaintenanceRecordModel as any)
+        .updateMany(
+          {
+            _id: {
+              $in: recordIds
+            }
+          },
+          {
+            $set: updatePayload
+          }
+        );
     } else {
       for (const id of recordIds) {
-        await MaintenanceRecordStore.findByIdAndUpdate(id, {
-          ...updatePayload,
-          ...(status === 'Paid' ? { receiptNumber: `REC-${Date.now().toString().slice(-6)}` } : {})
-        });
+        await MaintenanceRecordStore.findByIdAndUpdate(
+          id,
+          {
+            ...updatePayload,
+            ...(status === 'Paid'
+              ? {
+                  receiptNumber:
+                    `REC-${Date.now().toString().slice(-6)}`
+                }
+              : {})
+          }
+        );
       }
     }
 
     return res.json({
       success: true,
-      message: `Successfully updated ${recordIds.length} flats to ${status}`
+      message:
+        `Successfully updated ${recordIds.length} flats to ${status}`
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: 'Error in batch update', error: err.message });
+    return res.status(500).json({
+      success: false,
+      message: 'Error in batch update',
+      error: err.message
+    });
   }
 };
 
-export const batchSavePayments = async (req: Request, res: Response) => {
+/**
+ * BATCH SAVE PAYMENTS
+ */
+export const batchSavePayments = async (
+  req: Request,
+  res: Response
+) => {
   try {
     const { updates } = req.body;
 
-    if (!Array.isArray(updates) || updates.length === 0) {
-      return res.status(400).json({ success: false, message: 'updates array is required' });
+    if (
+      !Array.isArray(updates) ||
+      updates.length === 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: 'updates array is required'
+      });
     }
 
     const isMongo = dbState.isConnectedToMongo;
+
     let updatedCount = 0;
 
     for (const item of updates) {
-      if (!item.id || !['Paid', 'Pending'].includes(item.status)) continue;
+      if (
+        !item.id ||
+        !['Paid', 'Pending'].includes(item.status)
+      ) {
+        continue;
+      }
 
       const updateData: any = {
         status: item.status,
-        paidDate: item.status === 'Paid' ? (item.paidDate ? new Date(item.paidDate) : new Date()) : null
+        paidDate:
+          item.status === 'Paid'
+            ? item.paidDate
+              ? new Date(item.paidDate)
+              : new Date()
+            : null
       };
 
-      if (isMongo) {
-        await (MaintenanceRecordModel as any).findByIdAndUpdate(item.id, updateData);
+      if (item.status === 'Paid') {
+        updateData.paymentMode =
+          item.paymentMode || 'UPI';
+
+        updateData.receiptNumber =
+          item.receiptNumber ||
+          `REC-${Date.now().toString().slice(-6)}`;
       } else {
-        await MaintenanceRecordStore.findByIdAndUpdate(item.id, updateData);
+        updateData.paymentMode = '';
+        updateData.receiptNumber = '';
       }
+
+      if (item.remarks !== undefined) {
+        updateData.remarks = item.remarks;
+      }
+
+      if (item.amount !== undefined) {
+        const numericAmount = Number(item.amount);
+
+        if (
+          !Number.isNaN(numericAmount) &&
+          numericAmount >= 0
+        ) {
+          updateData.amount = numericAmount;
+        }
+      }
+
+      if (isMongo) {
+        await (MaintenanceRecordModel as any)
+          .findByIdAndUpdate(
+            item.id,
+            updateData
+          );
+      } else {
+        await MaintenanceRecordStore.findByIdAndUpdate(
+          item.id,
+          updateData
+        );
+      }
+
       updatedCount++;
     }
 
     return res.json({
       success: true,
-      message: `Successfully updated ${updatedCount} payment records`,
+      message:
+        `Successfully updated ${updatedCount} payment records`,
       updatedCount
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: 'Error saving batch payments', error: err.message });
+    return res.status(500).json({
+      success: false,
+      message: 'Error saving batch payments',
+      error: err.message
+    });
   }
 };
