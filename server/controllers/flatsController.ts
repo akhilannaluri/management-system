@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { dbState } from '../config/db';
 import { FlatModel, FlatStore } from '../models/Flat';
 import { ApartmentSettingsModel, SettingsStore } from '../models/ApartmentSettings';
-import { MaintenanceRecordModel, MaintenanceRecordStore } from '../models/MaintenanceRecord';
+
 
 export const getAllFlats = async (req: Request, res: Response) => {
   try {
@@ -336,68 +336,62 @@ if (mode === 'replace_all') {
   console.log('[Bulk Import] Existing flats:', existingFlats.length);
   console.log('[Bulk Import] Excel flats:', sanitizedFlats.length);
 
-  // 1. Remove all existing flats
-  if (isMongo) {
-    const deleteResult = await FlatModel.deleteMany({});
-    console.log(`[Bulk Import] Deleted ${deleteResult.deletedCount} existing flats`);
+  const importedFlatNumbers = new Set(
+    sanitizedFlats.map((f: any) =>
+      f.flatNumber.trim().toLowerCase()
+    )
+  );
 
-    // 2. Insert exactly the flats from Excel
-    await FlatModel.insertMany(sanitizedFlats);
-  } else {
-    for (const existing of existingFlats) {
+  // Update existing flats while preserving their IDs
+  for (const flatData of sanitizedFlats) {
+    const existing = existingMap.get(
+      flatData.flatNumber.trim().toLowerCase()
+    );
+
+    if (existing) {
       const id = existing._id || existing.id;
+
+      if (isMongo) {
+        await FlatModel.findByIdAndUpdate(id, flatData);
+      } else {
+        await FlatStore.findByIdAndUpdate(id, flatData);
+      }
+
+      updatedCount++;
+    } else {
+      // Create genuinely new flats
+      if (isMongo) {
+        await FlatModel.create(flatData);
+      } else {
+        await FlatStore.create(flatData);
+      }
+
+      insertedCount++;
+    }
+  }
+
+  // Remove flats that are not present in Excel
+  for (const existing of existingFlats) {
+    const flatNumber = (existing.flatNumber || '')
+      .trim()
+      .toLowerCase();
+
+    if (!importedFlatNumbers.has(flatNumber)) {
+      const id = existing._id || existing.id;
+
       if (id) {
-        await FlatStore.findByIdAndDelete(id);
-      }
-    }
-
-    await FlatStore.insertMany(sanitizedFlats);
-  }
-
-  insertedCount = sanitizedFlats.length;
-
-  console.log(`[Bulk Import] Inserted ${insertedCount} flats`);
-
-  // ---------------------------------------------------------
-  // 3. CLEAN CURRENT MONTH'S OLD MAINTENANCE RECORDS
-  // ---------------------------------------------------------
-
-  const currentMonth = new Date().toISOString().slice(0, 7);
-
-  if (isMongo) {
-    // Get the newly inserted flats
-    const newFlats = await FlatModel.find().select('_id').lean();
-
-    const validFlatIds = newFlats.map((flat: any) => flat._id);
-
-    // Remove maintenance records for flats that no longer exist
-    const result = await MaintenanceRecordModel.deleteMany({
-      month: currentMonth,
-      flatId: { $nin: validFlatIds }
-    });
-
-    console.log(
-      `[Bulk Import] Removed ${result.deletedCount} stale maintenance records for ${currentMonth}`
-    );
-  } else {
-    const newFlats = await FlatStore.find();
-
-    const validFlatIds = new Set(
-      newFlats.map((flat: any) => String(flat._id || flat.id))
-    );
-
-    const currentRecords = await MaintenanceRecordStore.find({
-      month: currentMonth
-    });
-
-    for (const record of currentRecords) {
-      if (!validFlatIds.has(String(record.flatId))) {
-        await MaintenanceRecordStore.findByIdAndDelete(
-          String(record._id || record.id)
-        );
+        if (isMongo) {
+          await FlatModel.findByIdAndDelete(id);
+        } else {
+          await FlatStore.findByIdAndDelete(id);
+        }
       }
     }
   }
+
+  console.log(
+    `[Bulk Import] Updated ${updatedCount}, inserted ${insertedCount}`
+  );
 
 } else {
   // Upsert mode

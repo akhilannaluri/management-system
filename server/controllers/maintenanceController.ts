@@ -132,28 +132,50 @@ export const getMonthMaintenance = async (req: Request, res: Response) => {
     }
 
     // Calculate all financial figures accurately from database records
-    const allMonthRecords = isMongo 
-      ? await (MaintenanceRecordModel as any).find({ month }).lean()
-      : await MaintenanceRecordStore.find({ month });
+    // Calculate financial figures for the actual active flats
+const allMonthRecords = isMongo
+  ? await (MaintenanceRecordModel as any).find({ month }).lean()
+  : await MaintenanceRecordStore.find({ month });
 
-    const totalFlats = allMonthRecords.length;
-    let expectedMaintenance = 0;
-    let totalCollected = 0;
-    let paidCount = 0;
-    let pendingCount = 0;
+const activeFlats = isMongo
+  ? await (FlatModel as any)
+      .find({ status: { $ne: 'Inactive' } })
+      .lean()
+  : await FlatStore.find((f: any) => (f.status || 'Active') !== 'Inactive');
 
-    for (const r of allMonthRecords) {
-      const amt = Number(r.amount) || 0;
-      expectedMaintenance += amt;
-      if (r.status === 'Paid') {
-        totalCollected += amt;
-        paidCount++;
-      } else {
-        pendingCount++;
-      }
-    }
+const totalFlats = activeFlats.length;
 
-    const totalPending = expectedMaintenance - totalCollected;
+const activeFlatIds = new Set(
+  activeFlats.map((flat: any) => String(flat._id || flat.id))
+);
+
+let expectedMaintenance = 0;
+let totalCollected = 0;
+let paidCount = 0;
+let pendingCount = 0;
+
+// Only count maintenance records belonging to current active flats
+for (const r of allMonthRecords) {
+  const flatId = String(
+    typeof r.flatId === 'object' && r.flatId?._id
+      ? r.flatId._id
+      : r.flatId
+  );
+
+  if (!activeFlatIds.has(flatId)) continue;
+
+  const amt = Number(r.amount) || 0;
+
+  expectedMaintenance += amt;
+
+  if (r.status === 'Paid') {
+    totalCollected += amt;
+    paidCount++;
+  } else {
+    pendingCount++;
+  }
+}
+   const totalPending = expectedMaintenance - totalCollected;
     const collectionPercentage = expectedMaintenance > 0 
       ? Number(((totalCollected / expectedMaintenance) * 100).toFixed(1)) 
       : 0;
