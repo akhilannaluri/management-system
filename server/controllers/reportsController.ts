@@ -27,13 +27,131 @@ export const getMonthlyReport = async (req: Request, res: Response) => {
     const isMongo = dbState.isConnectedToMongo;
 
     // 1. Maintenance Records for current month
-    const maintenanceRecords = isMongo 
-      ? await (MaintenanceRecordModel as any).find({ month }).lean()
-      : await MaintenanceRecordStore.find({ month });
+   // 1. Maintenance Records for current month
+// Build the report from CURRENT FLATS so every flat appears exactly once.
+// A maintenance record is used only when it belongs to the current flat.
 
-    maintenanceRecords.sort((a: any, b: any) => 
-      (a.flatNumber || '').localeCompare(b.flatNumber || '', undefined, { numeric: true })
-    );
+const currentFlatsRaw = isMongo
+  ? await (FlatModel as any).find({ status: { $ne: 'Inactive' } }).lean()
+  : await FlatStore.find((f: any) => (f.status || 'Active') !== 'Inactive');
+
+// Remove duplicate flats such as:
+// 101
+// Flat 101
+// by treating them as the same flat number.
+const flatMap = new Map<string, any>();
+
+for (const flat of currentFlatsRaw) {
+  const rawFlatNumber = String(flat.flatNumber || '').trim();
+
+  // Normalize "Flat 101" -> "101"
+  const normalizedFlatNumber = rawFlatNumber
+    .replace(/^flat\s*/i, '')
+    .trim()
+    .toLowerCase();
+
+  if (!normalizedFlatNumber) continue;
+
+  const existing = flatMap.get(normalizedFlatNumber);
+
+  if (!existing) {
+    flatMap.set(normalizedFlatNumber, flat);
+  } else {
+    // Prefer the flat whose number does NOT contain "Flat "
+    // e.g. prefer "101" over "Flat 101"
+    const existingNumber = String(existing.flatNumber || '').trim();
+    const currentNumber = rawFlatNumber;
+
+    if (
+      /^flat\s+/i.test(existingNumber) &&
+      !/^flat\s+/i.test(currentNumber)
+    ) {
+      flatMap.set(normalizedFlatNumber, flat);
+    }
+  }
+}
+
+const currentFlats = Array.from(flatMap.values());
+
+const monthRecords = isMongo
+  ? await (MaintenanceRecordModel as any).find({ month }).lean()
+  : await MaintenanceRecordStore.find({ month });
+
+// Keep only ONE maintenance record per current flat.
+const recordMap = new Map<string, any>();
+
+for (const record of monthRecords) {
+  const flatNumber = String(record.flatNumber || '')
+    .replace(/^flat\s*/i, '')
+    .trim()
+    .toLowerCase();
+
+  if (!flatNumber) continue;
+
+  const existing = recordMap.get(flatNumber);
+
+  if (!existing) {
+    recordMap.set(flatNumber, record);
+  } else {
+    const existingTime = new Date(
+      existing.updatedAt || existing.createdAt || 0
+    ).getTime();
+
+    const recordTime = new Date(
+      record.updatedAt || record.createdAt || 0
+    ).getTime();
+
+    if (recordTime >= existingTime) {
+      recordMap.set(flatNumber, record);
+    }
+  }
+}
+
+// Create exactly ONE report row for every CURRENT flat.
+const maintenanceRecords = currentFlats.map((flat: any) => {
+  const flatId = String(flat._id || flat.id);
+
+const normalizedFlatNumber = String(flat.flatNumber || '')
+  .replace(/^flat\s*/i, '')
+  .trim()
+  .toLowerCase();
+
+const existingRecord = recordMap.get(normalizedFlatNumber);
+
+  if (existingRecord) {
+    return {
+      ...existingRecord,
+      flatId,
+      flatNumber: flat.flatNumber,
+      residentName: flat.residentName,
+      amount:
+        existingRecord.amount ??
+        flat.customMaintenanceAmount ??
+        1500
+    };
+  }
+
+  // No payment record yet = Pending
+  return {
+    flatId,
+    flatNumber: flat.flatNumber,
+    residentName: flat.residentName,
+    amount: flat.customMaintenanceAmount ?? 1500,
+    status: 'Pending',
+    paidDate: null,
+    paymentMode: null,
+    receiptNumber: null,
+    remarks: null
+  };
+});
+
+maintenanceRecords.sort((a: any, b: any) =>
+  (a.flatNumber || '').localeCompare(
+    b.flatNumber || '',
+    undefined,
+    { numeric: true }
+  )
+);
 
     const totalFlats = maintenanceRecords.length;
     let expectedMaintenance = 0;
@@ -87,23 +205,85 @@ export const getMonthlyReport = async (req: Request, res: Response) => {
     const remainingBalance = collectedMaintenance - totalExpenses;
 
     // 3. Cumulative Summary (All records <= current month)
-    const allPriorPaidRecords = isMongo
-      ? await (MaintenanceRecordModel as any).find({ month: { $lte: month }, status: 'Paid' }).lean()
-      : await MaintenanceRecordStore.find((r: any) => r.month <= month && r.status === 'Paid');
+    // 3. Cumulative Summary
+// Calculate maintenance collection month-by-month using
+// ONE record per flat per month to prevent duplicate records
+// from inflating cumulative totals.
 
-    const allPriorExpenses = isMongo
-      ? await (MonthlyExpenseModel as any).find({ month: { $lte: month } }).lean()
-      : await MonthlyExpenseStore.find((e: any) => e.month <= month);
+const allMaintenanceRecords = isMongo
+  ? await (MaintenanceRecordModel as any)
+      .find({ month: { $lte: month } })
+      .lean()
+  : await MaintenanceRecordStore.find((r: any) => r.month <= month);
 
-    const cumulativeCollected = allPriorPaidRecords.reduce((sum: number, r: any) => sum + (Number(r.amount) || 0), 0);
-    const cumulativeExpenses = allPriorExpenses.reduce((sum: number, e: any) => sum + (Number(e.amount) || 0), 0);
-    const cumulativeSavings = cumulativeCollected - cumulativeExpenses;
+const cumulativeRecordMap = new Map<string, any>();
 
-    // List unique months included in cumulative calculation
-    const monthsSet = new Set<string>();
-    allPriorPaidRecords.forEach((r: any) => { if (r.month) monthsSet.add(r.month); });
-    allPriorExpenses.forEach((e: any) => { if (e.month) monthsSet.add(e.month); });
-    const monthsIncluded = Array.from(monthsSet).sort();
+for (const record of allMaintenanceRecords) {
+  const flatNumber = String(record.flatNumber || '')
+    .replace(/^flat\s*/i, '')
+    .trim()
+    .toLowerCase();
+
+  if (!flatNumber || !record.month) continue;
+
+  // One maintenance record per flat per month
+  const key = `${record.month}_${flatNumber}`;
+
+  const existing = cumulativeRecordMap.get(key);
+
+  if (!existing) {
+    cumulativeRecordMap.set(key, record);
+  } else {
+    const existingTime = new Date(
+      existing.updatedAt || existing.createdAt || 0
+    ).getTime();
+
+    const recordTime = new Date(
+      record.updatedAt || record.createdAt || 0
+    ).getTime();
+
+    if (recordTime >= existingTime) {
+      cumulativeRecordMap.set(key, record);
+    }
+  }
+}
+
+const uniquePaidRecords = Array.from(cumulativeRecordMap.values())
+  .filter((r: any) => r.status === 'Paid');
+
+const allPriorExpenses = isMongo
+  ? await (MonthlyExpenseModel as any)
+      .find({ month: { $lte: month } })
+      .lean()
+  : await MonthlyExpenseStore.find((e: any) => e.month <= month);
+
+const cumulativeCollected = uniquePaidRecords.reduce(
+  (sum: number, r: any) => sum + (Number(r.amount) || 0),
+  0
+);
+
+const cumulativeExpenses = allPriorExpenses.reduce(
+  (sum: number, e: any) => sum + (Number(e.amount) || 0),
+  0
+);
+
+const cumulativeSavings = cumulativeCollected - cumulativeExpenses;
+const monthsSet = new Set<string>();
+
+uniquePaidRecords.forEach((r: any) => {
+  if (r.month) {
+    monthsSet.add(r.month);
+  }
+});
+
+allPriorExpenses.forEach((e: any) => {
+  if (e.month) {
+    monthsSet.add(e.month);
+  }
+});
+
+const monthsIncluded = Array.from(monthsSet).sort();
+
 
     // 4. Tasks for the month
     const tasks = isMongo 
@@ -176,30 +356,75 @@ export const getAnnualOverview = async (req: Request, res: Response) => {
     const months = Array.from({ length: 12 }, (_, i) => `${currentYear}-${String(i + 1).padStart(2, '0')}`);
     const monthlyStats: any[] = [];
 
-    for (const m of months) {
-      const records = isMongo 
-        ? await (MaintenanceRecordModel as any).find({ month: m }).lean()
-        : await MaintenanceRecordStore.find({ month: m });
+   for (const m of months) {
+  const rawRecords = isMongo
+    ? await (MaintenanceRecordModel as any).find({ month: m }).lean()
+    : await MaintenanceRecordStore.find({ month: m });
 
-      const expenses = isMongo 
-        ? await (MonthlyExpenseModel as any).find({ month: m }).lean()
-        : await MonthlyExpenseStore.find({ month: m });
+  // Remove duplicate maintenance records for the same flat.
+  const recordMap = new Map<string, any>();
 
-      const expected = records.reduce((s: number, r: any) => s + (Number(r.amount) || 0), 0);
-      const collected = records.filter((r: any) => r.status === 'Paid').reduce((s: number, r: any) => s + (Number(r.amount) || 0), 0);
-      const expenseTotal = expenses.reduce((s: number, e: any) => s + (Number(e.amount) || 0), 0);
+  for (const record of rawRecords) {
+    const flatNumber = String(record.flatNumber || '')
+      .replace(/^flat\s*/i, '')
+      .trim()
+      .toLowerCase();
 
-      monthlyStats.push({
-        month: m,
-        expected,
-        collected,
-        pending: expected - collected,
-        expenses: expenseTotal,
-        netBalance: collected - expenseTotal,
-        paidCount: records.filter((r: any) => r.status === 'Paid').length,
-        totalFlats: records.length
-      });
+    if (!flatNumber) continue;
+
+    const existing = recordMap.get(flatNumber);
+
+    if (!existing) {
+      recordMap.set(flatNumber, record);
+    } else {
+      const existingTime = new Date(
+        existing.updatedAt || existing.createdAt || 0
+      ).getTime();
+
+      const recordTime = new Date(
+        record.updatedAt || record.createdAt || 0
+      ).getTime();
+
+      if (recordTime >= existingTime) {
+        recordMap.set(flatNumber, record);
+      }
     }
+  }
+
+  const records = Array.from(recordMap.values());
+
+  const expenses = isMongo
+    ? await (MonthlyExpenseModel as any).find({ month: m }).lean()
+    : await MonthlyExpenseStore.find({ month: m });
+
+  const expected = records.reduce(
+    (s: number, r: any) => s + (Number(r.amount) || 0),
+    0
+  );
+
+  const collected = records
+    .filter((r: any) => r.status === 'Paid')
+    .reduce(
+      (s: number, r: any) => s + (Number(r.amount) || 0),
+      0
+    );
+
+  const expenseTotal = expenses.reduce(
+    (s: number, e: any) => s + (Number(e.amount) || 0),
+    0
+  );
+
+  monthlyStats.push({
+    month: m,
+    expected,
+    collected,
+    pending: expected - collected,
+    expenses: expenseTotal,
+    netBalance: collected - expenseTotal,
+    paidCount: records.filter((r: any) => r.status === 'Paid').length,
+    totalFlats: records.length
+  });
+}
 
     return res.json({
       success: true,
